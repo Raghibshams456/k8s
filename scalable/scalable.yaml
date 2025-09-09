@@ -1,0 +1,136 @@
+# namespace
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: navatech
+---
+# Deployment (HA + resource requests/limits + probes + anti-affinity)
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: sample-app
+  namespace: navatech
+  labels:
+    app: sample-app
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: sample-app
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 1
+  template:
+    metadata:
+      labels:
+        app: sample-app
+    spec:
+      containers:
+      - name: http-echo
+        image: hashicorp/http-echo:0.2.3
+        args:
+        - "-text=hello from sample-app"
+        ports:
+        - containerPort: 5678
+        resources:
+          requests:
+            cpu: "100m"
+            memory: "128Mi"
+          limits:
+            cpu: "500m"
+            memory: "256Mi"
+        # simple TCP probe since this image doesn't implement /health
+        readinessProbe:
+          tcpSocket:
+            port: 5678
+          initialDelaySeconds: 5
+          periodSeconds: 5
+          failureThreshold: 3
+        livenessProbe:
+          tcpSocket:
+            port: 5678
+          initialDelaySeconds: 15
+          periodSeconds: 10
+          failureThreshold: 5
+      affinity:
+        podAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+          - labelSelector:
+              matchExpressions:
+              - key: app
+                operator: In
+                values:
+                - sample-app
+            topologyKey: kubernetes.io/hostname
+---
+# Service (ClusterIP)
+apiVersion: v1
+kind: Service
+metadata:
+  name: sample-app-svc
+  namespace: navatech
+spec:
+  selector:
+    app: sample-app
+  ports:
+  - port: 80
+    targetPort: 5678
+    protocol: TCP
+  type: ClusterIP
+---
+# Ingress (nginx) - adjust host as needed (using your VM IP example)
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: sample-app-ingress
+  namespace: navatech
+  annotations:
+    kubernetes.io/ingress.class: "nginx"
+spec:
+  ingressClassName: nginx
+  rules:
+  - host: myapp.192.168.49.2.nip.io
+    http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: sample-app-svc
+            port:
+              number: 80
+---
+# PodDisruptionBudget to keep availability during evictions/rollouts
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: sample-app-pdb
+  namespace: navatech
+spec:
+  minAvailable: 2
+  selector:
+    matchLabels:
+      app: sample-app
+---
+# HorizontalPodAutoscaler (scale on CPU)
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: sample-app-hpa
+  namespace: navatech
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: sample-app
+  minReplicas: 3
+  maxReplicas: 10
+  metrics:
+  - type: Resource
+    resource:
+      name: cpu
+      target:
+        type: Utilization
+        averageUtilization: 50
